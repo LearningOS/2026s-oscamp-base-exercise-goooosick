@@ -137,7 +137,22 @@ impl Scheduler {
     ///    `sp` must be 16-byte aligned (e.g. `(stack_top - 16) & !15` to leave headroom).
     /// 3. Push a `GreenThread` with this context, state `Ready`, and `entry` stored for the wrapper to call.
     pub fn spawn(&mut self, entry: extern "C" fn()) {
-        todo!("alloc stack, init ctx with ra=thread_wrapper and aligned sp, push GreenThread(Ready, entry)")
+        fn align_down(addr: usize, align: usize) -> usize {
+            addr & !(align - 1)
+        }
+
+        let vec = vec![0u8; STACK_SIZE];
+        let stack_top = align_down(vec.as_ptr() as usize + STACK_SIZE, 16);
+        self.threads.push(GreenThread {
+            ctx: TaskContext {
+                ra: thread_wrapper as usize as u64,
+                sp: stack_top as u64,
+                ..Default::default()
+            },
+            state: ThreadState::Ready,
+            _stack: Some(vec),
+            entry: Some(entry),
+        });
     }
 
     /// Run the scheduler until all threads (except the main one) are `Finished`.
@@ -146,12 +161,44 @@ impl Scheduler {
     /// 2. Loop: if all threads in `threads[1..]` are `Finished`, break; otherwise call `schedule_next()` (which may switch away and later return).
     /// 3. Clear `SCHEDULER` when done.
     pub fn run(&mut self) {
-        todo!("set SCHEDULER to self, loop until threads[1..] all Finished, call schedule_next, then clear SCHEDULER")
+        unsafe { SCHEDULER = self as *mut Scheduler };
+        loop {
+            if self.threads[1..]
+                .iter()
+                .all(|t| t.state == ThreadState::Finished)
+            {
+                break;
+            }
+            self.schedule_next();
+        }
+        unsafe { SCHEDULER = std::ptr::null_mut() };
     }
 
     /// Find the next ready thread (starting from `current + 1` round-robin), mark current as `Ready` (if not `Finished`), mark next as `Running`, set `CURRENT_THREAD_ENTRY` if the next thread has an entry, then switch to it.
     fn schedule_next(&mut self) {
-        todo!("round-robin find next Ready, set current Ready (if not Finished), next Running, CURRENT_THREAD_ENTRY, then switch_context")
+        if self.threads[self.current].state != ThreadState::Finished {
+            self.threads[self.current].state = ThreadState::Ready;
+        }
+        for i in 1..self.threads.len() {
+            let next_idx = (self.current + i) % self.threads.len();
+            let next_thread = &mut self.threads[next_idx];
+            if next_thread.state != ThreadState::Ready {
+                continue;
+            }
+
+            next_thread.state = ThreadState::Running;
+            if let Some(entry) = next_thread.entry.take() {
+                unsafe { CURRENT_THREAD_ENTRY = Some(entry) };
+            }
+            let current_idx = self.current;
+            self.current = next_idx;
+            if let Ok([old, new]) = self.threads.get_disjoint_mut([current_idx, next_idx]) {
+                unsafe {
+                    switch_context(&mut old.ctx, &new.ctx);
+                }
+                return;
+            }
+        }
     }
 }
 
